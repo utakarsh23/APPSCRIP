@@ -1,0 +1,8 @@
+.env
+__pycache__
+venv
+.venv
+scratch_*.py
+.cache/
+.tmp/
+.ipynb_checkpoints/
