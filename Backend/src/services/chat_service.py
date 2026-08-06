@@ -1,4 +1,5 @@
 import json
+import hashlib
 from datetime import datetime
 from supabase import Client
 from src.Config.redis import get_redis
@@ -14,26 +15,89 @@ def create_session(db: Client, file_id: str, user_id: str, title: str | None = N
         "created_at": now
     }
     response = db.table("chat_sessions").insert(record).execute()
-    if response.data and len(response.data) > 0:
-        return response.data[0]
-    return record
+    created_record = response.data[0] if (response.data and len(response.data) > 0) else record
+
+    r = get_redis()
+    if r is not None:
+        try:
+            r.delete(f"chat:user:{user_id}:sessions")
+            r.delete(f"chat:file:{file_id}:user:{user_id}:sessions")
+            if "id" in created_record:
+                r.setex(f"chat:session:{created_record['id']}", 3600, json.dumps(created_record))
+        except Exception:
+            pass
+
+    return created_record
 
 
 def get_session_by_id(db: Client, session_id: str) -> dict | None:
+    r = get_redis()
+    key = f"chat:session:{session_id}"
+    if r is not None:
+        try:
+            cached = r.get(key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
     response = db.table("chat_sessions").select("*").eq("id", session_id).execute()
     if response.data and len(response.data) > 0:
-        return response.data[0]
+        session_data = response.data[0]
+        if r is not None:
+            try:
+                r.setex(key, 3600, json.dumps(session_data))
+            except Exception:
+                pass
+        return session_data
+
     return None
 
 
 def get_sessions_for_file(db: Client, file_id: str, user_id: str) -> list[dict]:
+    r = get_redis()
+    key = f"chat:file:{file_id}:user:{user_id}:sessions"
+    if r is not None:
+        try:
+            cached = r.get(key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
     response = db.table("chat_sessions").select("*").eq("file_id", file_id).eq("user_id", user_id).order("created_at", desc=True).execute()
-    return response.data or []
+    sessions = response.data or []
+
+    if r is not None and sessions:
+        try:
+            r.setex(key, 1800, json.dumps(sessions))
+        except Exception:
+            pass
+
+    return sessions
 
 
 def get_sessions_for_user(db: Client, user_id: str) -> list[dict]:
+    r = get_redis()
+    key = f"chat:user:{user_id}:sessions"
+    if r is not None:
+        try:
+            cached = r.get(key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
     response = db.table("chat_sessions").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
-    return response.data or []
+    sessions = response.data or []
+
+    if r is not None and sessions:
+        try:
+            r.setex(key, 1800, json.dumps(sessions))
+        except Exception:
+            pass
+
+    return sessions
 
 
 def cache_message_in_redis(session_id: str, role: str, content: str, created_at: str) -> None:
@@ -49,7 +113,7 @@ def cache_message_in_redis(session_id: str, role: str, content: str, created_at:
         pass
 
 
-def get_messages_cached(db: Client, session_id: str, limit: int = 5) -> list[dict]:
+def get_messages_cached(db: Client, session_id: str, limit: int = 6) -> list[dict]:
     r = get_redis()
     key = f"chat:{session_id}:messages"
     if r is not None:
@@ -79,7 +143,46 @@ def get_messages_cached(db: Client, session_id: str, limit: int = 5) -> list[dic
     return messages
 
 
+def get_consecutive_duplicate_response(history: list[dict], current_query: str) -> str | None:
+    if not history:
+        return None
+
+    normalized_current = current_query.strip().lower()
+
+    last_user_idx = -1
+    for i in range(len(history) - 1, -1, -1):
+        if history[i].get("role") == "user":
+            last_user_idx = i
+            break
+
+    if last_user_idx == -1:
+        return None
+
+    last_user_content = history[last_user_idx].get("content", "").strip().lower()
+    if last_user_content != normalized_current:
+        return None
+
+    for i in range(last_user_idx + 1, len(history)):
+        if history[i].get("role") == "assistant":
+            return history[i].get("content")
+
+    return None
+
+
 def search_similar_chunks(db: Client, file_id: str, query_vector: list[float], top_k: int = 5) -> list[dict]:
+    vec_hash = hashlib.md5(str(query_vector).encode("utf-8")).hexdigest()
+    cache_key = f"chat:chunks_cache:{file_id}:{vec_hash}"
+
+    r = get_redis()
+    if r is not None:
+        try:
+            cached = r.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
+    results = []
     try:
         rpc_response = db.rpc(
             "match_document_chunks",
@@ -91,9 +194,18 @@ def search_similar_chunks(db: Client, file_id: str, query_vector: list[float], t
             }
         ).execute()
         if rpc_response.data:
-            return rpc_response.data
+            results = rpc_response.data
     except Exception:
         pass
 
-    fallback_response = db.table("document_chunks").select("id, chunk_index, content").eq("file_id", file_id).limit(top_k).execute()
-    return fallback_response.data or []
+    if not results:
+        fallback_response = db.table("document_chunks").select("id, chunk_index, content").eq("file_id", file_id).limit(top_k).execute()
+        results = fallback_response.data or []
+
+    if r is not None and results:
+        try:
+            r.setex(cache_key, 3600, json.dumps(results))
+        except Exception:
+            pass
+
+    return results

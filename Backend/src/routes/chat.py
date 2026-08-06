@@ -3,7 +3,6 @@ from fastapi import APIRouter, Request, HTTPException, Depends, status
 from fastapi.responses import StreamingResponse
 from supabase import Client
 from src.utils.database import get_db
-from src.services.file_service import get_db
 from src.services.embedding_service import embed_text
 from src.Schema.ChatIO import (
     CreateSessionRequest,
@@ -21,6 +20,7 @@ from src.services.chat_service import (
     get_sessions_for_file,
     get_sessions_for_user,
     get_messages_cached,
+    get_consecutive_duplicate_response,
     cache_message_in_redis,
     search_similar_chunks
 )
@@ -41,7 +41,7 @@ async def create_chat_session(
     db: Client = Depends(get_db)
 ) -> CreateSessionResponse:
     user_payload = getattr(request.state, "user", {}) or {}
-    user_id = user_payload.get("id") or user_payload.get("user_id") or user_payload.get("sub")
+    user_id = user_payload.get("id")
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user session.")
 
@@ -61,7 +61,7 @@ async def list_sessions_for_file(
     db: Client = Depends(get_db)
 ) -> list[ChatSessionResponse]:
     user_payload = getattr(request.state, "user", {}) or {}
-    user_id = user_payload.get("id") or user_payload.get("user_id") or user_payload.get("sub")
+    user_id = user_payload.get("id")
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user session.")
 
@@ -84,7 +84,7 @@ async def list_user_sessions(
     db: Client = Depends(get_db)
 ) -> list[ChatSessionResponse]:
     user_payload = getattr(request.state, "user", {}) or {}
-    user_id = user_payload.get("id") or user_payload.get("user_id") or user_payload.get("sub")
+    user_id = user_payload.get("id")
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user session.")
 
@@ -108,7 +108,7 @@ async def get_session_messages(
     db: Client = Depends(get_db)
 ) -> GetMessagesResponse:
     user_payload = getattr(request.state, "user", {}) or {}
-    user_id = user_payload.get("id") or user_payload.get("user_id") or user_payload.get("sub")
+    user_id = user_payload.get("id")
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user session.")
 
@@ -138,7 +138,7 @@ async def chat_query(
     db: Client = Depends(get_db)
 ):
     user_payload = getattr(request.state, "user", {}) or {}
-    user_id = user_payload.get("id") or user_payload.get("user_id") or user_payload.get("sub")
+    user_id = user_payload.get("id")
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid user session.")
 
@@ -149,15 +149,28 @@ async def chat_query(
     file_id = str(session["file_id"])
     query_text = body.query
 
+    history = get_messages_cached(db, session_id, limit=10)
+    cached_duplicate_response = get_consecutive_duplicate_response(history, query_text)
+
     user_now = datetime.utcnow().isoformat()
     cache_message_in_redis(session_id, "user", query_text, user_now)
     await publish_chat_message_event(
         ChatMessageEventPayload(session_id=session_id, role="user", content=query_text, created_at=user_now)
     )
 
+    if cached_duplicate_response:
+        async def cached_sse_generator():
+            yield f"data: {cached_duplicate_response}\n\n"
+            assistant_now = datetime.utcnow().isoformat()
+            cache_message_in_redis(session_id, "assistant", cached_duplicate_response, assistant_now)
+            await publish_chat_message_event(
+                ChatMessageEventPayload(session_id=session_id, role="assistant", content=cached_duplicate_response, created_at=assistant_now)
+            )
+
+        return StreamingResponse(cached_sse_generator(), media_type="text/event-stream")
+
     query_vector = embed_text(query_text)
     top_chunks = search_similar_chunks(db, file_id, query_vector, top_k=5)
-    history = get_messages_cached(db, session_id, limit=10)
 
     system_prompt_text = render_system_prompt()
     cached_content_name = get_or_create_context_cache(file_id, system_prompt_text)

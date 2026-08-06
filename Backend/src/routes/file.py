@@ -1,8 +1,12 @@
 import uuid
 import asyncio
-from fastapi import APIRouter, Request, UploadFile, File, HTTPException, status
+from fastapi import APIRouter, Request, UploadFile, File, HTTPException, Depends, status
+from supabase import Client
+from src.utils.database import get_db
 from src.Schema.FileIO import FileUploadResponse
+from src.Schema.File import FileModel
 from src.utils.chunking import chunk_text
+from src.services.file_service import get_user_files_cached, evict_user_files_cache
 from src.events.schema.file_event import FileUploadEventPayload
 from src.events.schema.chunk_event import FileChunkEventPayload
 from src.events.publisher.file_publisher import publish_file_upload_event
@@ -20,7 +24,7 @@ async def upload_file(request: Request, file: UploadFile = File(...)) -> FileUpl
         )
 
     user_payload = getattr(request.state, "user", {}) or {}
-    user_id = user_payload.get("id") or user_payload.get("user_id") or user_payload.get("sub")
+    user_id = user_payload.get("id")
     if not user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -56,8 +60,27 @@ async def upload_file(request: Request, file: UploadFile = File(...)) -> FileUpl
         publish_chunk_embed_events(chunk_payloads)
     )
 
+    evict_user_files_cache(str(user_id))
+
     return FileUploadResponse(
         message="File processing queued successfully",
         filename=file.filename,
         status="queued"
     )
+
+
+@router.get("", response_model=list[FileModel])
+async def list_files(
+    request: Request,
+    db: Client = Depends(get_db)
+) -> list[FileModel]:
+    user_payload = getattr(request.state, "user", {}) or {}
+    user_id = user_payload.get("id")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid user session."
+        )
+
+    files = get_user_files_cached(db, str(user_id))
+    return [FileModel(**f) for f in files]

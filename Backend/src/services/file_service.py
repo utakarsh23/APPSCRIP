@@ -1,7 +1,44 @@
 import uuid
+import json
 from datetime import datetime
+from supabase import Client
 from src.utils.database import get_db
+from src.Config.redis import get_redis
 from src.events.schema.file_event import FileUploadEventPayload
+
+
+def evict_user_files_cache(user_id: str | None) -> None:
+    if not user_id:
+        return
+    r = get_redis()
+    if r is not None:
+        try:
+            r.delete(f"files:user:{user_id}")
+        except Exception:
+            pass
+
+
+def get_user_files_cached(db: Client, user_id: str) -> list[dict]:
+    r = get_redis()
+    key = f"files:user:{user_id}"
+    if r is not None:
+        try:
+            cached = r.get(key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+
+    response = db.table("files").select("*").eq("user_id", user_id).eq("is_active", True).order("created_at", desc=True).execute()
+    files = response.data or []
+
+    if r is not None and files:
+        try:
+            r.setex(key, 1800, json.dumps(files))
+        except Exception:
+            pass
+
+    return files
 
 
 def save_file_to_storage(payload: FileUploadEventPayload) -> dict:
@@ -32,4 +69,5 @@ def save_file_to_storage(payload: FileUploadEventPayload) -> dict:
     }
 
     db.table("files").insert(file_record).execute()
+    evict_user_files_cache(payload.user_id)
     return file_record
