@@ -1,8 +1,9 @@
 import uuid
 import json
 from datetime import datetime
+from fastapi import HTTPException, status
 from supabase import Client
-from src.utils.database import get_db
+from src.Config.database import get_db
 from src.Config.redis import get_redis
 from src.events.schema.file_event import FileUploadEventPayload
 
@@ -39,6 +40,28 @@ def get_user_files_cached(db: Client, user_id: str) -> list[dict]:
             pass
 
     return files
+
+
+def get_file_status(db: Client, file_id: str, user_id: str) -> dict:
+    file_res = db.table("files").select("*").eq("id", file_id).eq("user_id", user_id).execute()
+    if not file_res.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+    file_record = file_res.data[0]
+
+    chunks_res = db.table("document_chunks").select("id", count="exact").eq("file_id", file_id).execute()
+    total_chunks = chunks_res.count if chunks_res.count is not None else len(chunks_res.data or [])
+
+    status_str = "completed" if total_chunks > 0 else "processing"
+
+    return {
+        "file_id": file_id,
+        "filename": file_record.get("name"),
+        "status": status_str,
+        "total_chunks": total_chunks
+    }
 
 
 def save_file_to_storage(payload: FileUploadEventPayload) -> dict:

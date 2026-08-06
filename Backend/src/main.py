@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 from fastapi import FastAPI
 from src.config import settings
-from src.utils.database import connect_db, disconnect_db
+from src.Config.database import connect_db, disconnect_db
 from src.Config.nats import connect_nats, disconnect_nats
 from src.Config.redis import connect_redis, disconnect_redis
 from src.events.subscriber.file_subscriber import start_file_subscriber

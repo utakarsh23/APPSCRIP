@@ -3,7 +3,7 @@ import asyncio
 import logging
 from src.config import settings
 from src.Config.nats import get_js
-from src.utils.database import get_db
+from src.Config.database import get_db
 
 logger = logging.getLogger(__name__)
 

@@ -68,6 +68,12 @@ def signup_user(db: Client, request: UserSignupRequest) -> UserResponse:
 
 
 def login_user(db: Client, request: UserLoginRequest) -> TokenResponse:
+    if not request.email and not request.username:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username or email is required"
+        )
+
     user = None
     if request.email:
         user = get_user_by_email(db, request.email)
@@ -79,6 +85,7 @@ def login_user(db: Client, request: UserLoginRequest) -> TokenResponse:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials"
         )
+
 
     access_token = create_access_token(
         data={"id": str(user.id), "username": user.username, "email": user.email}

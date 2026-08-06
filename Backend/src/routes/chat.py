@@ -2,7 +2,7 @@ from datetime import datetime
 from fastapi import APIRouter, Request, HTTPException, Depends, status
 from fastapi.responses import StreamingResponse
 from supabase import Client
-from src.utils.database import get_db
+from src.Config.database import get_db
 from src.services.embedding_service import embed_text
 from src.Schema.ChatIO import (
     CreateSessionRequest,

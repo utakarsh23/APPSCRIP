@@ -1,0 +1,135 @@
+================================================================================
+SYSTEM ARCHITECTURE AND OPERATIONS SPECIFICATION
+Document ID: SEC-SPEC-2026-V4
+Classification: Confidential - Engineering Internal
+Target System: Global Distributed Financial Event Processor & RAG Telemetry Platform
+================================================================================
+
+1. EXECUTIVE SUMMARY & SYSTEM OVERVIEW
+--------------------------------------------------------------------------------
+The Distributed Financial Event Processor & RAG Telemetry Platform (Project Apex) is a high-throughput, fault-tolerant event-driven architecture designed to ingest streaming financial telemetry, compute real-time risk scores, and serve intelligent AI search/RAG queries over millions of transaction records.
+
+The primary uptime target is 99.999% SLA (five nines) with p99 API latencies strictly under 45 milliseconds for standard transaction evaluation, and under 250 milliseconds for Retrieval-Augmented Generation (RAG) vector queries.
+
+Key Operational Thresholds:
+- Peak Ingestion Throughput: 150,000 events/second.
+- Micro-Batch Flush Frequency: 500ms or 5,000 items, whichever comes first.
+- Vector Embedding Latency Target: < 60ms for 512-token chunks using HNSW indexing.
+- Maximum Allowed Memory Drift: < 2% over 72 continuous operating hours.
+
+
+2. INFRASTRUCTURE & MESSAGING TOPOLOGY
+--------------------------------------------------------------------------------
+2.1 Message Broker Strategy (NATS JetStream Cluster)
+The core asynchronous transport relies on a 5-node NATS JetStream cluster deployed across 3 Availability Zones (AZ-East-1a, AZ-East-1b, AZ-East-1c).
+
+Streams Configured:
+1. `TRANSACTIONS_STREAM`: Captures raw transactional payloads.
+   - Subjects: `transactions.us.*`, `transactions.eu.*`, `transactions.ap.*`
+   - Retention Policy: WorkQueue (acknowledgement required per message).
+   - Maximum Payload Size: 1 MB.
+   - Replicas: 3 (Quorum-based Raft consensus).
+
+2. `TELEMETRY_STREAM`: Captures vector embedding ingestion events.
+   - Subjects: `files.upload`, `files.embed`
+   - Maximum Age: 7 days.
+   - Storage Type: File storage engine with flash NVMe backend.
+
+2.2 In-Memory Caching Topology (Redis Sentinel & Cluster)
+A multi-tier Redis setup is utilized to achieve sub-millisecond hot reads:
+- Tier 1 (Session & Auth Cache): Standalone Redis Sentinel pair for active JWT claims and rate-limit counters (TTL: 900 seconds).
+- Tier 2 (Vector Similarity Cache): Redis Cluster with 6 shards caching HNSW vector search results keyed by `chat:chunks_cache:{file_id}:{vector_hash}` (TTL: 1800 seconds).
+- Eviction Policy: `volatile-lru` for search caches, `noeviction` for critical idempotency keys.
+
+
+3. DATA STORAGE & VECTOR DDL SCHEMA
+--------------------------------------------------------------------------------
+3.1 Relational & Vector Storage (Supabase PostgreSQL + pgvector)
+Database Engine: PostgreSQL 16.2 with `pgvector` v0.6.0 extension enabled.
+
+Primary Tables:
+- `users`: Stores user identity, bcrypt hashed credentials, and role-based access control (RBAC) metadata.
+- `files`: Stores uploaded metadata (file_hash, MIME type, storage_path, chunk_count).
+- `document_chunks`: Stores parsed text chunks, 1536-dimension embeddings, and HNSW cosine distance indexes.
+- `chat_sessions` & `chat_messages`: High-concurrency message audit log flushed asynchronously via micro-batching.
+
+3.2 Migration DDL Snippet (Vector Cosine Indexing)
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS public.document_chunks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    file_id UUID NOT NULL REFERENCES public.files(id) ON DELETE CASCADE,
+    chunk_index INT NOT NULL,
+    content TEXT NOT NULL,
+    embedding vector(1536) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- B-Tree Index for rapid file-scoped filtering
+CREATE INDEX IF NOT EXISTS idx_document_chunks_file_id 
+ON public.document_chunks USING btree (file_id);
+
+-- Hierarchical Navigable Small World (HNSW) Index for sub-linear similarity search
+CREATE INDEX IF NOT EXISTS idx_document_chunks_vector_hnsw 
+ON public.document_chunks USING hnsw (embedding vector_cosine_ops)
+WITH (m = 16, ef_construction = 64);
+```
+
+
+4. AUTHENTICATION & SECURITY POLICIES
+--------------------------------------------------------------------------------
+4.1 Authentication Workflow
+- Algorithm: HMAC SHA-256 (HS256) JWT signed via master private key.
+- Token Expiration: 15 minutes for Access Tokens, 7 days for Refresh Tokens.
+- Password Hashing Strategy: `bcrypt` with work factor 12. Password input is strictly truncated to 72 bytes prior to hashing to mitigate denial-of-service vulnerabilities.
+
+4.2 Security Rules & Header Enforcement
+1. All client communication must enforce TLS 1.3.
+2. Request headers must present valid `Authorization: Bearer <token>`.
+3. Global Middleware validates token signatures, checks user active status in Redis, and populates `request.state.user` (`id`, `username`, `email`).
+4. Rate Limiting: 120 requests/minute per authenticated user IP using Redis Sliding Window algorithm.
+
+
+5. INCIDENT RESPONSE PLAYBOOK & KNOWN GOTCHAS
+--------------------------------------------------------------------------------
+5.1 High Memory Usage in JetStream Consumers
+Symptom: Memory usage spikes past 85% on NATS subscriber pods.
+Root Cause: Unacknowledged messages piling up due to slow downstream vector generation or HF Inference endpoint rate limiting.
+Remediation Steps:
+1. Scale HF Inference concurrency from 4 to 12 workers.
+2. Verify Redis vector cache hit ratio using `INFO stats`.
+3. Execute `nats consumer cluster-stats FILES_STREAM` to identify lagging consumer groups.
+
+5.2 Database Deadlocks on Batch Inserts
+Symptom: Supabase logs report `deadlock detected` during `POST /chat/session/{id}` spikes.
+Root Cause: Concurrent NATS batch workers inserting into `chat_messages` without deterministic row ordering.
+Remediation Steps:
+1. Ensure NATS batch processor sorts payload arrays by `session_id` and `created_at` prior to executing `bulk_insert`.
+2. Enforce explicit row lock acquisition order: `chat_sessions` first, followed by `chat_messages`.
+
+5.3 API Response Error Codes & Troubleshooting
+- HTTP 401 Unauthorized: Invalid, expired, or missing JWT Bearer token.
+- HTTP 429 Too Many Requests: Exceeded sliding window rate limit (120 req/min).
+- HTTP 500 Internal Server Error: Caught by global exception middleware (`src/middleware/exception.py`). Automatically writes stack trace, request method, endpoint URL, IP address, and user ID into database table `error_logs`.
+
+
+6. SAMPLE TEST QUERIES FOR RAG VERIFICATION
+--------------------------------------------------------------------------------
+To test RAG chunk extraction, vector similarity scoring, and LLM context building, run the following target verification queries against this file:
+
+Query 1: "What are the NATS JetStream replica counts and retention policies for TRANSACTIONS_STREAM?"
+Expected Ground Truth Context: Section 2.1 - WorkQueue retention policy, 3 replicas (Quorum-based Raft consensus), payload max 1MB.
+
+Query 2: "Explain the HNSW index parameters used for document chunks."
+Expected Ground Truth Context: Section 3.2 - `m = 16`, `ef_construction = 64`, `vector_cosine_ops`.
+
+Query 3: "What is the remediation procedure when NATS subscriber pods experience high memory spikes?"
+Expected Ground Truth Context: Section 5.1 - Scale HF Inference concurrency 4->12, check Redis cache hit ratio, run `nats consumer cluster-stats`.
+
+Query 4: "What password hashing strategy is implemented and how is DoS mitigated?"
+Expected Ground Truth Context: Section 4.1 - `bcrypt` with work factor 12, truncated to 72 bytes to prevent DoS.
+
+================================================================================
+END OF SPECIFICATION
+================================================================================

@@ -1,36 +1,31 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
+import bcrypt
 from jose import jwt, JWTError
-from passlib.context import CryptContext
 from src.config import settings
 
-password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+ACCESS_TOKEN_EXPIRATION = 24  # in hours
+ALGORITHM = "HS256"
 
-ACCESS_TOKEN_EXPIRATION=24 #in hours
-ALGORITHM="HS256"
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return password_context.verify(plain_password, hashed_password)
+    return bcrypt.checkpw(plain_password.encode("utf-8")[:72], hashed_password.encode("utf-8"))
 
 
 def get_password_hash(password: str) -> str:
-    return password_context.hash(password)
+    return bcrypt.hashpw(password.encode("utf-8")[:72], bcrypt.gensalt()).decode("utf-8")
 
 
 def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     now = datetime.now(timezone.utc)
-    if expires_delta:
-        expire = now + expires_delta
-    else:
-        expire = now + timedelta(hours=ACCESS_TOKEN_EXPIRATION)
+    expire = now + (expires_delta or timedelta(hours=ACCESS_TOKEN_EXPIRATION))
     to_encode.update({"exp": expire, "iat": now})
-    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=ALGORITHM)
 
 
 def decode_access_token(token: str) -> dict[str, Any] | None:
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        return payload
+        return jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
         return None

@@ -2,11 +2,11 @@ import uuid
 import asyncio
 from fastapi import APIRouter, Request, UploadFile, File, HTTPException, Depends, status
 from supabase import Client
-from src.utils.database import get_db
-from src.Schema.FileIO import FileUploadResponse
+from src.Config.database import get_db
+from src.Schema.FileIO import FileUploadResponse, FileStatusResponse
 from src.Schema.File import FileModel
 from src.utils.chunking import chunk_text
-from src.services.file_service import get_user_files_cached, evict_user_files_cache
+from src.services.file_service import get_user_files_cached, evict_user_files_cache, get_file_status
 from src.events.schema.file_event import FileUploadEventPayload
 from src.events.schema.chunk_event import FileChunkEventPayload
 from src.events.publisher.file_publisher import publish_file_upload_event
@@ -64,9 +64,28 @@ async def upload_file(request: Request, file: UploadFile = File(...)) -> FileUpl
 
     return FileUploadResponse(
         message="File processing queued successfully",
+        file_id=file_id,
         filename=file.filename,
         status="queued"
     )
+
+
+@router.get("/{file_id}/status", response_model=FileStatusResponse)
+async def check_file_status(
+    file_id: str,
+    request: Request,
+    db: Client = Depends(get_db)
+) -> FileStatusResponse:
+    user_payload = getattr(request.state, "user", {}) or {}
+    user_id = user_payload.get("id")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid user session."
+        )
+
+    status_dict = get_file_status(db, file_id, str(user_id))
+    return FileStatusResponse(**status_dict)
 
 
 @router.get("", response_model=list[FileModel])

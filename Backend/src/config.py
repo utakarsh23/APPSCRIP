@@ -7,11 +7,11 @@ class Settings(BaseSettings):
     SECRET_KEY: str = ""
     SUPABASE_URL: str = ""
     SUPABASE_KEY: str = ""
-    EMBEDDING_MODEL: str = "Qwen/Qwen3-Embedding-8B"
+    EMBEDDING_MODEL: str = "gemini-embedding-001"
     NATS_URL: str = "nats://localhost:4222"
     HF_TOKEN: str = ""
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-1.5-flash"
+    GEMINI_MODEL: str = "gemini-3.1-flash-lite"
     REDIS_URL: str = "redis://localhost:6379"
     BATCH_FLUSH_INTERVAL: int = 120
     BATCH_FLUSH_SIZE: int = 100
