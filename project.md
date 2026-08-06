@@ -5,6 +5,7 @@ Build a FastAPI backend demonstrating solid backend engineering practices and im
 
 ## System Architecture & Guidelines
 - **Framework**: FastAPI (clean, modular structure in `Backend/src/`: routes, services, Schema, events, middleware, templates, utils, config, Config)
+- **Reverse Proxy & Edge Rate Limiting**: Nginx (`nginx:alpine` in Docker Compose) serving as API Gateway / Reverse Proxy on port `80`, enforcing IP rate limiting (`10r/s` general API burst 20, `15r/m` chat streaming burst 5) with custom JSON 429 responses and unbuffered SSE streaming (`proxy_buffering off`)
 - **Design Pattern**: Functional architecture (classes are used exclusively for models and schemas in `src/Schema/` and `src/events/schema/`; services, event handlers, routes, middleware, and utilities use standalone functions)
 - **Message Broker**: NATS JetStream (`FILES_STREAM` for upload/embed, dedicated `CHAT_STREAM` for `chat.messages` micro-batching)
 - **Parallel Upload Pipeline**: Upload router splits raw file event (`files.upload`) and in-memory chunk events (`files.embed`), publishing both concurrently via `asyncio.gather()`
@@ -70,7 +71,7 @@ Build a FastAPI backend demonstrating solid backend engineering practices and im
 ### Good to Have
 - [x] **Redis**: Hot-cache for chat history, file lists, vector search cache, and active session memory with eviction on new session/file creation.
 - [x] **Kafka / Message Broker**: NATS JetStream implemented for file upload, chunk embedding, and chat micro-batching.
-- [x] **Docker & Docker Compose**: `Dockerfile` + `docker-compose.yml` for backend, NATS+JetStream, and Redis with health checks and persistent volumes.
+- [x] **Docker & Docker Compose**: `Dockerfile` + `docker-compose.yml` + `nginx/nginx.conf` for reverse proxy, rate limiting, backend, NATS+JetStream, and Redis.
 - [x] **Background Jobs**: Async NATS background workers for storage, embeddings, and chat batch inserts.
 - [x] **Streaming LLM Responses**: Server-Sent Events (SSE) `StreamingResponse` for `/chat`.
 - [ ] **Unit Tests**: Test suite using `pytest` & `httpx` for routes and services.

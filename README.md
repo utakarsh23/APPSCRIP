@@ -1,47 +1,146 @@
 # FastAPI + AI (RAG) Backend
 
-A production-grade FastAPI backend that lets users upload text documents, have them chunked and embedded into vectors, and then chat with those documents using a Retrieval-Augmented Generation pipeline — all powered by Google Gemini, NATS JetStream, Redis, and PostgreSQL with pgvector.
+Upload a text document, have it chunked and embedded into vectors, and chat with it — answers are streamed back in real-time using Retrieval-Augmented Generation.
+
+Built with FastAPI, PostgreSQL (pgvector), NATS JetStream, Redis, Nginx, and Google Gemini.
 
 ---
 
-## What This Does
+## How It Works
 
-1. **Upload a document** → it gets split into chunks, each chunk gets embedded into a 1024-dimensional vector using Google's `gemini-embedding-001`, and stored alongside the raw text in Supabase (PostgreSQL + pgvector).
+You upload a `.txt` file. Behind the scenes, it gets split into overlapping chunks, each chunk gets embedded into a 1024-dimensional vector via Google's `gemini-embedding-001`, and those vectors land in a `document_chunks` table in PostgreSQL with a pgvector HNSW index.
 
-2. **Ask questions about it** → your query gets embedded, the system finds the most relevant chunks via cosine similarity search (HNSW index), feeds them as context into Gemini `3.1 Flash Lite`, and streams the answer back to you in real-time via Server-Sent Events.
+When you ask a question, the query itself gets embedded, the system runs a cosine similarity search against those stored chunks, grabs the top 5 most relevant ones, and feeds them as context — along with the last few conversation turns — into Gemini `3.1 Flash Lite`. The response streams back to you chunk-by-chunk via Server-Sent Events.
 
-3. **Everything in between** is designed to be fast — Redis caches chat history, session lookups, file lists, and even repeated vector searches. NATS JetStream handles the async pipeline so uploads don't block, and chat messages get micro-batched into the database every 2 minutes instead of one-by-one.
+The upload doesn't block. The chat doesn't wait for DB writes. Everything that can be async, is.
 
 ---
 
-## Architecture Overview
+## Architecture
 
+```mermaid
+flowchart TD
+    Client([Client / Frontend]) -->|Requests| Nginx[Nginx Reverse Proxy & Rate Limiter]
+
+    subgraph FastAPI Backend
+        AuthRouter[Auth Router]
+        FileRouter[File Router]
+        ChatRouter[Chat Router]
+    end
+
+    Nginx -->|/auth/*| AuthRouter
+    Nginx -->|/files/*| FileRouter
+    Nginx -->|/chat/*| ChatRouter
+
+    %% File Ingestion Pipeline
+    subgraph Ingestion Pipeline
+        FileRouter -->|Evict Cache| RedisFileCache[("Redis: files:user:{id}")]
+        FileRouter -->|asyncio.gather| NATS_FilesUpload[NATS: files.upload]
+        FileRouter -->|asyncio.gather| NATS_FilesEmbed[NATS: files.embed]
+        
+        NATS_FilesUpload --> FileWorker[File Worker]
+        FileWorker --> SupabaseStorage[(Supabase Storage)]
+        FileWorker --> DB_Files[(DB: files table)]
+
+        NATS_FilesEmbed --> ChunkWorker[Chunk Worker]
+        ChunkWorker -->|Gemini Embedding| DB_Chunks[(DB: document_chunks pgvector HNSW)]
+    end
+
+    %% RAG & Chat Pipeline
+    subgraph RAG & Chat Pipeline
+        ChatRouter --> DuplicateCheck{Consecutive Duplicate Check?}
+        DuplicateCheck -->|Hit| FastResponse[Return Cached Response 0 LLM Cost]
+        
+        DuplicateCheck -->|Miss| EmbedQuery[Embed User Query]
+        
+        EmbedQuery --> CheckVecCache{Check Redis Vector Cache?}
+        CheckVecCache -->|Hit| ChunksFound[Cached Top-K Chunks]
+        CheckVecCache -->|Miss| PgVectorSearch[pgvector HNSW RPC Search]
+        PgVectorSearch -->|Save Cache| RedisVecCache[("Redis: chat:chunks_cache:*")]
+        PgVectorSearch --> ChunksFound
+
+        EmbedQuery --> FetchHistory[("Fetch History from Redis List\nchat:{session_id}:messages")]
+
+        ChunksFound --> RenderPrompt[Jinja2 Context Prompt Rendering]
+        FetchHistory --> RenderPrompt
+
+        RenderPrompt --> GeminiLLM[Gemini 3.1 Flash Lite + Context Cache]
+        GeminiLLM -->|SSE Stream| FastResponse
+        GeminiLLM -->|Push Message| RedisHistoryCache[("Redis: chat:{session_id}:messages")]
+        GeminiLLM -->|NATS chat.messages| NATS_Chat[NATS JetStream: CHAT_STREAM]
+        
+        NATS_Chat --> BatchWorker[Async Micro-Batch Worker]
+        BatchWorker -->|Flush every 2min / 100 msgs| DB_ChatMsgs[(DB: chat_messages table)]
+    end
+
+    FastResponse -->|SSE Chunked Response| Client
 ```
-Client
-  │
-  ├── POST /auth/signup, /auth/login  →  JWT token
-  │
-  ├── POST /files/upload  →  file_id + "queued" status
-  │       │
-  │       ├── NATS: files.upload  →  File Worker (stores raw file in Supabase Storage + DB)
-  │       └── NATS: files.embed   →  Chunk Worker (embeds each chunk via Gemini → pgvector)
-  │
-  ├── GET  /files/{file_id}/status  →  processing status + chunk count
-  ├── GET  /files                   →  list user files (Redis cached)
-  │
-  ├── POST /chat/session            →  create a chat session tied to a file
-  ├── GET  /chat/sessions/{file_id} →  list sessions for a file
-  ├── GET  /chat/sessions           →  list all user sessions
-  ├── GET  /chat/session/{id}/messages → get conversation history
-  │
-  └── POST /chat/session/{id}       →  SSE streaming RAG response
-          │
-          ├── Embed query → pgvector Top-K similarity search (Redis cached)
-          ├── Jinja2 prompt rendering (context + history + query)
-          ├── Gemini streaming response (with Context Caching per file)
-          ├── Redis hot-cache write (message history)
-          └── NATS: chat.messages → Batch Writer (flushes to DB every 2min / 100 msgs)
-```
+
+---
+
+## Why These Technologies
+
+### NATS JetStream
+
+The file processing pipeline needs to be async — when a user uploads a document, the API should return immediately with a `file_id` and "queued" status, not wait around while 15 chunks get embedded one by one. That's the job of a message broker.
+
+Kafka would've worked but it's heavy for a single-node setup — you're dealing with Zookeeper (or KRaft), partition management, and a much larger operational surface. RabbitMQ is solid but NATS with JetStream gives us durable message delivery, consumer acknowledgment, and replay — all in a single binary under 20MB. It starts in milliseconds, needs zero configuration beyond enabling JetStream, and the `nats-py` client is async-native which fits perfectly with FastAPI.
+
+There are two streams:
+
+- **`FILES_STREAM`** handles the upload pipeline. When a file comes in, the router publishes two events concurrently via `asyncio.gather()` — one for raw file storage (`files.upload`) and one for chunk embedding (`files.embed`). Two separate NATS workers pick these up independently.
+
+- **`CHAT_STREAM`** handles chat message persistence. Instead of writing every user/assistant message to PostgreSQL immediately (which would be an INSERT on every single chat turn), messages get published to `chat.messages` and a batch writer accumulates them in memory, flushing to the DB every 2 minutes or every 100 messages — whichever comes first. Redis holds the hot copy in the meantime so reads are instant.
+
+### Redis — and where it's actually used
+
+Redis isn't here as a "nice to have". It's doing real work across multiple layers:
+
+**Chat history hot-cache** — Every chat message (user + assistant) gets appended to a Redis list (`chat:{session_id}:messages`) the moment it's generated. When the next query comes in and needs the last 10 messages for context, they're read from Redis — not from PostgreSQL where they might not even be flushed yet (because of the NATS micro-batching). This is the only reliable source of truth for recent messages.
+
+**Vector search result caching** — When a query gets embedded and we run a pgvector similarity search, the results (top-K chunks) get cached under `chat:chunks_cache:{file_id}:{md5(vector)}`. If the same or a very similar query hits again, we skip the pgvector RPC entirely. For a RAG system where users often rephrase slightly or ask follow-ups that produce similar embeddings, this saves a meaningful number of DB round-trips.
+
+**Session and file list caching** — Session metadata, user session lists, file-scoped session lists, and the `GET /files` response all get cached with automatic eviction. When a user creates a new session, the relevant list caches get evicted so stale data doesn't show up. When a user uploads a new file, the file list cache for that user gets cleared. These are small things but they add up when every API call otherwise hits Supabase over the network.
+
+Here's the full picture of what's cached, for how long, and when it gets invalidated:
+
+| Cache Key | What It Stores | TTL | Evicted When |
+|---|---|---|---|
+| `files:user:{user_id}` | `GET /files` response | 30 min | User uploads a new file |
+| `chat:session:{session_id}` | Session metadata lookup | 1 hour | — |
+| `chat:user:{user_id}:sessions` | All sessions for a user | 30 min | New session created |
+| `chat:file:{file_id}:user:{user_id}:sessions` | Sessions scoped to a file | 30 min | New session created |
+| `chat:{session_id}:messages` | Conversation history (Redis list) | 1 hour | — |
+| `chat:chunks_cache:{file_id}:{vec_hash}` | Top-K similarity search results | 1 hour | — |
+
+### Consecutive Duplicate Query Detection — the cheapest optimization
+
+This one came from watching real usage patterns. Users sometimes hit send twice, or re-ask the same question because the stream didn't render fast enough. Each duplicate query would normally trigger an embedding call, a pgvector search, and a full Gemini generation — easily the most expensive operation in the system.
+
+The fix is simple: before doing any of that, look at the last user message in the conversation history. If it's identical to the current query (case-insensitive, trimmed), grab the assistant response that followed it and serve that directly. No embedding, no vector search, no LLM call. The response comes back from Redis in under a millisecond.
+
+This isn't a general semantic cache — it only catches exact consecutive duplicates. But those are surprisingly common, and each one saved is ~$0 in API cost and ~2-3 seconds of latency eliminated.
+
+### Nginx — edge rate limiting
+
+Rate limiting is handled at the Nginx layer, not in the application. Two zones:
+
+- **General API**: 10 requests/second per IP with a burst of 20.
+- **Chat streaming**: 15 requests/minute per IP with a burst of 5.
+
+The chat limit is stricter because each streaming request holds a connection open and triggers an LLM call. Nginx returns a clean JSON 429 response (`{"detail":"Too many requests. Rate limit exceeded.","status_code":429}`) and the FastAPI exception middleware picks up and logs these to the `error_logs` table.
+
+SSE streaming works through Nginx because `proxy_buffering` is disabled and `chunked_transfer_encoding` is off for the `/chat/session/` location — otherwise Nginx would buffer the entire Gemini response before sending it to the client, defeating the purpose of streaming.
+
+### HNSW over IVFFlat — for pgvector indexing
+
+HNSW was chosen because:
+
+- **No tuning required** — IVFFlat needs you to pick `nlist` (number of clusters) and `nprobes` (how many to search) and get them right for your data distribution. HNSW works well out of the box with `m=16` and `ef_construction=64`.
+- **No retraining** — IVFFlat clusters become stale after large inserts and need periodic `REINDEX`. HNSW maintains its graph incrementally.
+- **Consistent latency** — HNSW queries are O(log N). IVFFlat query speed depends heavily on how many probes you configure vs. how many clusters exist.
+
+The trade-off is memory — HNSW uses more (~12-15 MB per 10k chunks at 1024 dimensions). At the scale of document-level RAG, this is negligible.
 
 ---
 
@@ -50,6 +149,7 @@ Client
 ```
 Backend/
 ├── .env.example
+├── Dockerfile
 ├── requirements.txt
 ├── migrations/
 │   ├── 01_auth.sql
@@ -57,41 +157,40 @@ Backend/
 │   ├── 03_chat.sql
 │   └── 04_error_logs.sql
 └── src/
-    ├── config.py              # Pydantic settings (env vars)
-    ├── main.py                # FastAPI app, lifespan, middleware, router registration
+    ├── config.py              # Pydantic settings
+    ├── main.py                # App, lifespan, middleware, routers
     ├── Config/
     │   ├── database.py        # Supabase client
-    │   ├── nats.py            # NATS JetStream connection + streams
+    │   ├── nats.py            # JetStream connection + streams
     │   └── redis.py           # Redis connection
-    ├── Schema/
-    │   ├── user.py            # User Pydantic model
-    │   ├── File.py            # File Pydantic model
-    │   ├── FileIO.py          # Upload/status request/response models
-    │   ├── Chat.py            # Chat session & message models
-    │   └── ChatIO.py          # Chat request/response models
+    ├── Schema/                # Pydantic models (request/response)
     ├── routes/
     │   ├── auth.py            # /auth/signup, /auth/login
     │   ├── file.py            # /files/upload, /files, /files/{id}/status
-    │   └── chat.py            # /chat/session, /chat/sessions, /chat/session/{id}
+    │   └── chat.py            # /chat/* endpoints
     ├── services/
     │   ├── auth_service.py    # Signup/login logic
-    │   ├── file_service.py    # File queries, Redis caching, status check
-    │   ├── embedding_service.py  # Gemini embeddings + pgvector insert
+    │   ├── file_service.py    # File queries, Redis caching, status
+    │   ├── embedding_service.py  # Gemini embeddings + pgvector
     │   ├── chat_service.py    # Sessions, messages, similarity search, duplicate caching
-    │   └── llm_service.py     # Gemini SDK, Jinja2 rendering, Context Caching, streaming
+    │   └── llm_service.py     # Gemini SDK, Jinja2, Context Caching, streaming
     ├── events/
-    │   ├── schema/            # FileUploadEventPayload, FileChunkEventPayload, ChatMessageEventPayload
+    │   ├── schema/            # Event payloads
     │   ├── publisher/         # NATS publish functions
-    │   └── subscriber/        # NATS workers (file_subscriber, chunk_subscriber, chat_subscriber)
+    │   └── subscriber/        # Workers (file, chunk, chat batch)
     ├── middleware/
-    │   ├── auth.py            # JWT verification middleware
-    │   └── exception.py       # Global error logging middleware (4xx + 5xx → error_logs table)
+    │   ├── auth.py            # JWT verification
+    │   └── exception.py       # Error logging (4xx + 5xx → DB)
     ├── templates/
-    │   ├── system_prompt.j2   # System instruction (conversational persona)
-    │   └── context_prompt.j2  # Dynamic RAG context + history + query
+    │   ├── system_prompt.j2   # System instruction
+    │   └── context_prompt.j2  # RAG context + history + query
     └── utils/
-        ├── security.py        # Password hashing (bcrypt), JWT encode/decode
-        └── chunking.py        # Text chunking logic
+        ├── security.py        # bcrypt, JWT encode/decode
+        └── chunking.py        # Text chunking
+nginx/
+└── nginx.conf                 # Rate limiting + reverse proxy
+docker-compose.yml             # Nginx + Backend + NATS + Redis
+nats-server.conf               # JetStream config
 ```
 
 ---
@@ -102,14 +201,13 @@ Backend/
 
 - Python 3.12+
 - A [Supabase](https://supabase.com) project (free tier works)
-- [NATS Server](https://nats.io) with JetStream enabled
-- [Redis](https://redis.io)
-- A [Google AI Studio](https://aistudio.google.com) API key (for Gemini)
+- A [Google AI Studio](https://aistudio.google.com) API key
+- Docker (if using Docker Compose) or NATS + Redis installed locally
 
 ### 1. Clone & Install
 
 ```bash
-git clone https://github.com/your-username/BC06.git
+git clone https://github.com/utakarsh23/APPSCRIP.git
 cd BC06/Backend
 
 python3 -m venv venv
@@ -123,100 +221,85 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Open `.env` and fill in your actual values:
+Fill in your values:
 
 | Variable | What It Is |
 |---|---|
-| `SECRET_KEY` | Any random string for signing JWTs |
+| `SECRET_KEY` | Random string for signing JWTs |
 | `SUPABASE_URL` | Your Supabase project URL |
-| `SUPABASE_KEY` | Supabase `service_role` key (found in Project Settings → API) |
+| `SUPABASE_KEY` | Supabase `service_role` key (Project Settings → API) |
 | `GEMINI_API_KEY` | Google AI Studio API key |
-| `GEMINI_MODEL` | Chat model to use (default: `gemini-3.1-flash-lite`) |
-| `HF_TOKEN` | HuggingFace token (optional fallback for embeddings) |
-| `NATS_URL` | NATS server URL (default: `nats://localhost:4222`) |
-| `REDIS_URL` | Redis URL (default: `redis://localhost:6379`) |
+| `GEMINI_MODEL` | Chat model (default: `gemini-3.1-flash-lite`) |
+| `HF_TOKEN` | HuggingFace token (optional embedding fallback) |
+| `NATS_URL` | Default: `nats://localhost:4222` |
+| `REDIS_URL` | Default: `redis://localhost:6379` |
 
 ### 3. Run Database Migrations
 
-Go to your Supabase Dashboard → SQL Editor and run the migration files in order:
+In your Supabase Dashboard → SQL Editor, run these in order:
 
 1. `migrations/01_auth.sql`
 2. `migrations/02_files_and_embeddings.sql`
 3. `migrations/03_chat.sql`
 4. `migrations/04_error_logs.sql`
 
-### 4. Start Infrastructure & Server
+### 4. Start Everything
 
-You can run the entire system (FastAPI, NATS JetStream, and Redis) either with Docker Compose or manually.
-
-#### Option A: Docker Compose (Recommended)
-
-Ensure `Backend/.env` has your Supabase and Gemini keys set, then run:
+#### Docker Compose
 
 ```bash
 docker compose up --build
 ```
 
-This starts:
-- **NATS JetStream** (`nats:2.10-alpine`) on `4222` with HTTP stats on `8222`
-- **Redis** (`redis:7-alpine`) on `6379`
-- **FastAPI Backend** (built from `Backend/Dockerfile`) on `8000`
+Starts Nginx (`:80`), FastAPI (`:8000`), NATS JetStream (`:4222`), and Redis (`:6379`) with health checks and dependency ordering.
 
-Health checks ensure the backend starts only after NATS and Redis are healthy.
-
-#### Option B: Manual Local Startup
-
-In separate terminals:
+#### Manual
 
 ```bash
-# Terminal 1: NATS with JetStream
+# Terminal 1
 nats-server -js
 
-# Terminal 2: Redis
+# Terminal 2
 redis-server
 
-# Terminal 3: FastAPI Backend
-cd Backend
-source venv/bin/activate
+# Terminal 3
+cd Backend && source venv/bin/activate
 uvicorn src.main:app --reload --port 8000
 ```
 
-Hit `http://localhost:8000/health` — you should see `{"status": "ok", "environment": "development"}`.
+Check: `http://localhost:8000/health` → `{"status": "ok", "environment": "development"}`
 
 ---
 
-## API Reference
+## API Endpoints
+
+All endpoints except `/auth/*` and `/health` require `Authorization: Bearer <token>`.
 
 ### Auth
-
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/auth/signup` | Register a new user (`username`, `email`, `password`) |
-| `POST` | `/auth/login` | Login and receive a JWT (`email`, `password`) |
+| `POST` | `/auth/signup` | Register (`username`, `email`, `password`) |
+| `POST` | `/auth/login` | Login → JWT token |
 
 ### Files
-
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/files/upload` | Upload a `.txt` file (multipart form) → returns `file_id` |
-| `GET` | `/files/{file_id}/status` | Check processing status (`queued` / `processing` / `completed`) |
-| `GET` | `/files` | List all uploaded files for the authenticated user |
+| `POST` | `/files/upload` | Upload `.txt` → `file_id` + "queued" |
+| `GET` | `/files/{file_id}/status` | Processing status + chunk count |
+| `GET` | `/files` | List user's files |
 
 ### Chat
-
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/chat/session` | Create a chat session tied to a `file_id` |
-| `GET` | `/chat/sessions/{file_id}` | List chat sessions for a specific file |
-| `GET` | `/chat/sessions` | List all chat sessions for the user |
-| `GET` | `/chat/session/{session_id}/messages` | Get conversation history |
-| `POST` | `/chat/session/{session_id}` | Send a query → SSE streaming RAG response |
-
-All endpoints except `/auth/*` and `/health` require a `Authorization: Bearer <token>` header.
+| `POST` | `/chat/session` | Create session for a `file_id` |
+| `GET` | `/chat/sessions/{file_id}` | Sessions for a file |
+| `GET` | `/chat/sessions` | All user sessions |
+| `GET` | `/chat/session/{id}/messages` | Conversation history |
+| `POST` | `/chat/session/{id}` | Query → SSE streaming response |
 
 ---
 
-## Quick Test (curl)
+## Quick Test
 
 ```bash
 # Sign up
@@ -224,27 +307,29 @@ curl -X POST http://localhost:8000/auth/signup \
   -H "Content-Type: application/json" \
   -d '{"username": "testuser", "email": "test@example.com", "password": "password123"}'
 
-# Login (grab the token)
+# Login
 TOKEN=$(curl -s -X POST http://localhost:8000/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email": "test@example.com", "password": "password123"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+  -d '{"email": "test@example.com", "password": "password123"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 
-# Upload a file
+# Upload
 curl -X POST http://localhost:8000/files/upload \
   -H "Authorization: Bearer $TOKEN" \
   -F "file=@your_document.txt"
 
-# Check status (use the file_id from the upload response)
-curl -X GET http://localhost:8000/files/<file_id>/status \
+# Check status
+curl http://localhost:8000/files/<file_id>/status \
   -H "Authorization: Bearer $TOKEN"
 
-# Create a chat session
+# Create chat session
 SESSION_ID=$(curl -s -X POST http://localhost:8000/chat/session \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"file_id": "<file_id>", "title": "My Chat"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['session_id'])")
+  -d '{"file_id": "<file_id>", "title": "My Chat"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['session_id'])")
 
-# Chat with your document (streaming)
+# Chat (streaming)
 curl -N -X POST http://localhost:8000/chat/session/$SESSION_ID \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
@@ -253,66 +338,11 @@ curl -N -X POST http://localhost:8000/chat/session/$SESSION_ID \
 
 ---
 
-## Caching Strategy
-
-There are multiple caching layers, each solving a different problem:
-
-| Cache Key Pattern | What It Caches | TTL | Evicted When |
-|---|---|---|---|
-| `files:user:{user_id}` | `GET /files` response | 30 min | User uploads a new file |
-| `chat:session:{session_id}` | Session metadata | 1 hour | — |
-| `chat:user:{user_id}:sessions` | User's session list | 30 min | New session created |
-| `chat:file:{file_id}:user:{user_id}:sessions` | File-scoped session list | 30 min | New session created |
-| `chat:{session_id}:messages` | Conversation history (Redis list) | 1 hour | — |
-| `chat:chunks_cache:{file_id}:{vec_hash}` | Vector similarity search results | 1 hour | — |
-| **Consecutive duplicate detection** | Back-to-back identical queries | In-memory | Different query asked |
-
-The consecutive duplicate detection is worth calling out — if a user sends the exact same query twice in a row, the system serves the cached assistant response immediately without hitting Gemini or pgvector at all. Zero LLM cost.
-
----
-
-## Why HNSW Over IVFFlat?
-
-Both are pgvector index types for approximate nearest-neighbor search. Here's why HNSW was chosen:
-
-| Factor | HNSW | IVFFlat |
-|---|---|---|
-| **Query speed** | O(log N) — consistently fast | Depends on number of probes; can be slower |
-| **Accuracy** | Higher recall out of the box | Needs careful tuning of `nlist` and `nprobes` |
-| **Insert speed** | Slower builds | Faster builds |
-| **Memory** | ~12–15 MB per 10k chunks (1024-dim) | Lower memory footprint |
-| **Maintenance** | No retraining needed | Needs periodic `REINDEX` after large inserts |
-
-For a RAG use case where query quality matters more than bulk insert speed, HNSW with `m=16` and `ef_construction=64` gives the best balance of recall and performance. The memory overhead is minimal at the scale this project operates at.
-
----
-
 ## Error Logging
 
-Every HTTP error (4xx and 5xx) gets automatically logged to the `error_logs` table in Supabase by the global exception middleware. Each log entry captures:
+A global middleware intercepts every HTTP response. Anything ≥ 400 gets logged to the `error_logs` table in Supabase — that includes 401s from bad tokens, 429s from rate limits, 400s from validation failures, and 500s from unhandled crashes.
 
-- `timestamp`
-- `endpoint` and `http_method`
-- `error_message` and `stack_trace` (for 500s)
-- `ip_address` (supports `X-Forwarded-For`)
-- `user_id` (if authenticated)
-
-This means rate limits, auth failures, bad requests, and server crashes all end up in one queryable table.
-
----
-
-## NATS JetStream Design
-
-Two streams handle different workloads:
-
-**`FILES_STREAM`** — File processing pipeline
-- `files.upload` → File worker stores the raw file in Supabase Storage and records metadata in the `files` table.
-- `files.embed` → Chunk worker generates embeddings via Gemini and inserts them into `document_chunks`.
-- Both events are published concurrently via `asyncio.gather()` so the upload response returns immediately.
-
-**`CHAT_STREAM`** — Chat message persistence
-- `chat.messages` → Batch writer accumulates messages in memory and flushes them to the `chat_messages` table every 2 minutes or every 100 messages, whichever comes first.
-- This avoids hammering the database with individual inserts on every chat turn while Redis keeps the hot copy for instant reads.
+Each entry captures `timestamp`, `endpoint`, `http_method`, `error_message`, `stack_trace` (for 500s), `ip_address` (respects `X-Forwarded-For` from Nginx), and `user_id` if the request was authenticated.
 
 ---
 
@@ -322,10 +352,12 @@ Two streams handle different workloads:
 |---|---|
 | Framework | FastAPI |
 | Database | PostgreSQL (Supabase) + pgvector |
-| Object Storage | Supabase Storage |
+| Storage | Supabase Storage |
 | Message Broker | NATS JetStream |
 | Cache | Redis |
+| Reverse Proxy | Nginx |
 | Embeddings | Google GenAI `gemini-embedding-001` (1024-dim) |
 | Chat LLM | Google Gemini `3.1 Flash Lite` |
 | Auth | JWT (HS256) + bcrypt |
-| Prompt Engine | Jinja2 |
+| Prompts | Jinja2 |
+| Containerization | Docker Compose |
