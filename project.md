@@ -19,8 +19,8 @@ Build a FastAPI backend demonstrating solid backend engineering practices and im
 - **NATS Micro-Batching**: Async NATS worker micro-batches chat messages into Supabase DB every 2 min or 100 messages
 - **Authentication**: JWT authentication with password hashing (`passlib` + `bcrypt`, `python-jose`)
 - **JWT Verification Middleware**: Global HTTP middleware (`src/middleware/auth.py`) enforcing JWT Bearer token authentication on all protected routes, populating `request.state.user` (`id`, `username`, `email`)
+- **Custom Exception Middleware**: Global HTTP middleware (`src/middleware/exception.py`) catching unhandled exceptions, logging error metrics (`timestamp`, `endpoint`, `http_method`, `error_message`, `stack_trace`, `ip_address`, `user_id`) to Supabase `error_logs` table, returning standardized 500 JSON error responses
 - **AI/RAG Pipeline**: Document ingestion via NATS pub/sub, chunking, vector embedding generation via HF Inference API & storage in `document_chunks` (`pgvector`), Top-K similarity search, and SSE streaming chat response (`POST /chat/session/{session_id}`)
-- **Middleware**: Custom exception-handling middleware logging errors to DB (timestamp, endpoint, HTTP method, error message, stack trace, user ID) returning standardized JSON error responses
 
 ---
 
@@ -29,7 +29,7 @@ Build a FastAPI backend demonstrating solid backend engineering practices and im
 2. **Database & Indexing**: [DONE] Supabase (PostgreSQL + `pgvector`) client configured in `src/utils/database.py`.
 3. **Document Ingestion Endpoint**: [DONE] Parallel event-driven file upload & chunk embedding pipeline (`POST /files/upload`, `GET /files` with Redis caching & upload eviction -> `asyncio.gather` pub to `files.upload` & `files.embed` -> raw file worker + HF Inference Qwen embedding worker).
 4. **Chat Endpoint (`/chat`)**: [DONE] File-scoped chat sessions (`POST /chat/session`, `GET /chat/sessions/{file_id}`, `GET /chat/sessions`, `GET /chat/session/{session_id}/messages`, `POST /chat/session/{session_id}`) with Top-K `pgvector` similarity search, Jinja2 prompt rendering, Gemini Context Caching, conversation-aware consecutive duplicate response caching, vector search caching, SSE streaming, Redis hot-cache with session eviction, and NATS micro-batching.
-5. **Exception Middleware**: [PENDING] Global error handler catching unhandled exceptions and logging to DB.
+5. **Exception Middleware**: [DONE] Global error handler catching unhandled exceptions, logging telemetry (`ip_address`, `stack_trace`, `user_id`, etc.) to `error_logs` DB table, and returning standardized 500 JSON responses.
 6. **Project Structure**: [DONE] Modular structure created in `Backend/src/` (`config.py`, `main.py`, `Config/`, `events/`, `middleware/`, `templates/`, `Schema/`, `services/`, `utils/`, `routes/`).
 
 ---
@@ -55,7 +55,7 @@ Build a FastAPI backend demonstrating solid backend engineering practices and im
 - [x] Implement Vector Search Caching in `search_similar_chunks()`.
 - [x] Implement Redis Hot-Cache (with session caching & eviction) & NATS Micro-Batching Chat Message Writer.
 - [x] Implement RAG Chat Endpoints (`POST /chat/session`, `GET /chat/sessions/{file_id}`, `GET /chat/sessions`, `GET /chat/session/{session_id}/messages`, `POST /chat/session/{session_id}`).
-- [ ] Implement Custom Exception Middleware (DB logging for errors + standardized JSON response).
+- [x] Implement Custom Exception Middleware (`src/middleware/exception.py` logging errors + `ip_address` to `error_logs` DB table + 500 JSON response).
 - [ ] Write `README.md` (setup instructions, indexing choices) and `.env.example`.
 
 ### Good to Have

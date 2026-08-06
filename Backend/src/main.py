@@ -9,6 +9,7 @@ from src.events.subscriber.file_subscriber import start_file_subscriber
 from src.events.subscriber.chunk_subscriber import start_chunk_subscriber
 from src.events.subscriber.chat_subscriber import start_chat_batch_subscriber
 from src.middleware.auth import verify_jwt_middleware
+from src.middleware.exception import exception_handling_middleware
 from src.routes.auth import router as auth_router
 from src.routes.file import router as file_router
 from src.routes.chat import router as chat_router
@@ -39,6 +40,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+app.middleware("http")(exception_handling_middleware)
 app.middleware("http")(verify_jwt_middleware)
 
 app.include_router(auth_router)
