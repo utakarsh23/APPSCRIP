@@ -1,6 +1,5 @@
 import nats
 from nats.js import JetStreamContext
-from nats.js.api import StreamConfig
 from src.config import settings
 
 nc = None
@@ -19,6 +18,10 @@ async def setup_streams() -> None:
     if js:
         try:
             await js.add_stream(name="FILES_STREAM", subjects=["files.upload", "files.embed"])
+        except Exception:
+            pass
+        try:
+            await js.add_stream(name="CHAT_STREAM", subjects=["chat.messages"])
         except Exception:
             pass
 

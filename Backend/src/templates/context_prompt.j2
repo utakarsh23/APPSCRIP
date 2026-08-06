@@ -1,0 +1,23 @@
+Document Context Chunks:
+{% if chunks %}
+{% for chunk in chunks %}
+--- Chunk {{ loop.index }} ---
+{{ chunk.content }}
+{% endfor %}
+{% else %}
+No relevant document context chunks found.
+{% endif %}
+
+Recent Conversation History:
+{% if history %}
+{% for msg in history %}
+{{ msg.role | capitalize }}: {{ msg.content }}
+{% endfor %}
+{% else %}
+No prior conversation history.
+{% endif %}
+
+Current User Query:
+User: {{ query }}
+
+Assistant Response:
