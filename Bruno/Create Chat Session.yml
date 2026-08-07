@@ -1,0 +1,35 @@
+info:
+  name: Create Chat Session
+  type: http
+  seq: 7
+
+http:
+  method: POST
+  url: http://localhost:8000/chat/session
+  headers:
+    - name: Authorization
+      value: Bearer {{token}}
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+          "file_id": "{{file_id}}",
+          "title": "Architecture Q&A"
+      }
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: after-response
+      code: |-
+        if (res.status === 201) {
+          bru.setEnvVar("session_id", res.body.session_id);
+        }
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

@@ -1,0 +1,32 @@
+info:
+  name: Upload File
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: http://localhost:8000/files/upload
+  headers:
+    - name: Authorization
+      value: Bearer {{token}}
+  body:
+    type: multipartForm
+    data:
+      - name: file
+        type: file
+        value: ./Files/distributed_cloud_architecture_spec.txt
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: after-response
+      code: |-
+        if (res.status === 202) {
+          bru.setEnvVar("file_id", res.body.file_id);
+        }
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

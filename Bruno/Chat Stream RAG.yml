@@ -1,0 +1,26 @@
+info:
+  name: Chat Stream RAG
+  type: http
+  seq: 10
+
+http:
+  method: POST
+  url: http://localhost:8000/chat/session/{{session_id}}
+  headers:
+    - name: Authorization
+      value: Bearer {{token}}
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+          "query": "Summarize the key operational specs in this document."
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

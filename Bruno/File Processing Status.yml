@@ -1,0 +1,18 @@
+info:
+  name: File Processing Status
+  type: http
+  seq: 5
+
+http:
+  method: GET
+  url: http://localhost:8000/files/{{file_id}}/status
+  headers:
+    - name: Authorization
+      value: Bearer {{token}}
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
