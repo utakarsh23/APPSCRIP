@@ -142,6 +142,29 @@ HNSW was chosen because:
 
 The trade-off is memory — HNSW uses more (~12-15 MB per 10k chunks at 1024 dimensions). At the scale of document-level RAG, this is negligible.
 
+### Database Schema & Indexing Choices
+
+Here is how I structured the relational database schemas and indexed every table to keep queries fast:
+
+1. **`users` table**
+   - **Indexes**: Explicit B-tree indexes on `email` and `username`. Since authentication happens on almost every API call, B-tree indexes give us $O(\log N)$ lookup performance during login and duplicate signup checks.
+
+2. **`files` table**
+   - **Indexes**: Composite B-tree index on `(user_id, is_active, created_at DESC)`. When `GET /files` is called, PostgreSQL uses this index to immediately filter by user and serve files sorted newest-first without needing a separate sorting step.
+
+3. **`document_chunks` table**
+   - **Indexes**:
+     - Composite B-tree index on `(file_id, chunk_index)` for reconstructing document chunks in sequence.
+     - **HNSW Vector Index** (`idx_document_chunks_embedding_hnsw`) using `vector_cosine_ops` with `m=16` and `ef_construction=64`. This allows cosine similarity search (`1 - (embedding <=> query_embedding)`) inside our `match_document_chunks` RPC function to run in logarithmic time.
+
+4. **`chat_sessions` & `chat_messages` tables**
+   - **Indexes**:
+     - Composite B-tree index on `chat_sessions(user_id, file_id, created_at DESC)` for session listing.
+     - Composite B-tree index on `chat_messages(session_id, created_at ASC)` so retrieving past conversation turns for RAG context is an index-only scan ordered chronologically.
+
+5. **`error_logs` table**
+   - **Indexes**: B-tree index on `timestamp DESC` and `user_id` so telemetry dashboards and debugging queries run instantly.
+
 ---
 
 ## Project Structure
@@ -383,3 +406,13 @@ Each entry captures `timestamp`, `endpoint`, `http_method`, `error_message`, `st
 | Auth | JWT (HS256) + bcrypt |
 | Prompts | Jinja2 |
 | Containerization | Docker Compose |
+
+---
+
+## Developer Intake & Future Roadmap
+
+If you want to read about some developers input, architectural proposals, scaling thoughts etc. then check this out :
+
+👉 **[DEVELOPER_INTAKE.md](DEVELOPER_INTAKE.md)**
+
+
