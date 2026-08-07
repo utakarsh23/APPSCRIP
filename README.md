@@ -14,6 +14,9 @@ When you ask a question, the query itself gets embedded, the system runs a cosin
 
 The upload doesn't block. The chat doesn't wait for DB writes. Everything that can be async, is.
 
+> [!TIP]
+> 📸 **Visual Proof of Execution & Screenshots**: Want to see visual screenshots of all API endpoints, SSE chat streaming, duplicate query caching, and Supabase error telemetry in action? Check out **[Screenshots.md](Screenshots.md)**.
+
 ---
 
 ## Architecture
