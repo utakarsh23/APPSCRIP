@@ -3,7 +3,7 @@ import hashlib
 from datetime import datetime
 from supabase import Client
 from src.Config.redis import get_redis
-from src.Schema.Chat import ChatSessionModel, ChatMessageModel
+from src.schemas.domain.chat import ChatSessionModel, ChatMessageModel
 
 
 def create_session(db: Client, file_id: str, user_id: str, title: str | None = None) -> dict:
@@ -100,7 +100,7 @@ def get_sessions_for_user(db: Client, user_id: str) -> list[dict]:
     return sessions
 
 
-def cache_message_in_redis(session_id: str, role: str, content: str, created_at: str) -> None:
+def cache_messages(session_id: str, role: str, content: str, created_at: str) -> None:
     r = get_redis()
     if r is None:
         return
@@ -113,7 +113,7 @@ def cache_message_in_redis(session_id: str, role: str, content: str, created_at:
         pass
 
 
-def get_messages_cached(db: Client, session_id: str, limit: int = 6) -> list[dict]:
+def get_messages(db: Client, session_id: str, limit: int = 6) -> list[dict]:
     r = get_redis()
     key = f"chat:{session_id}:messages"
     if r is not None:

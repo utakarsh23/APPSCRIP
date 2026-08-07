@@ -11,10 +11,10 @@ async def start_file_subscriber() -> None:
         subject="files.upload",
         durable="file-upload-worker"
     )
-    asyncio.create_task(_listen_for_file_uploads(sub))
+    asyncio.create_task(listen_files_uploads(sub))
 
 
-async def _listen_for_file_uploads(sub) -> None:
+async def listen_files_uploads(sub) -> None:
     async for msg in sub.messages:
         try:
             data = json.loads(msg.data.decode("utf-8"))

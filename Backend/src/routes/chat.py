@@ -4,11 +4,10 @@ from fastapi.responses import StreamingResponse
 from supabase import Client
 from src.Config.database import get_db
 from src.services.embedding_service import embed_text
-from src.Schema.ChatIO import (
-    CreateSessionRequest,
+from src.schemas.request.chat import CreateSessionRequest, ChatRequest
+from src.schemas.response.chat import (
     CreateSessionResponse,
     ChatSessionResponse,
-    ChatRequest,
     GetMessagesResponse,
     ChatMessageItem
 )
@@ -19,9 +18,9 @@ from src.services.chat_service import (
     get_session_by_id,
     get_sessions_for_file,
     get_sessions_for_user,
-    get_messages_cached,
+    get_messages,
     get_consecutive_duplicate_response,
-    cache_message_in_redis,
+    cache_messages,
     search_similar_chunks
 )
 from src.services.llm_service import (
@@ -116,7 +115,7 @@ async def get_session_messages(
     if not session or str(session["user_id"]) != str(user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
 
-    messages = get_messages_cached(db, session_id, limit=50)
+    messages = get_messages(db, session_id, limit=50)
     items = [
         ChatMessageItem(
             id=str(m.get("id")) if m.get("id") else None,
@@ -149,11 +148,11 @@ async def chat_query(
     file_id = str(session["file_id"])
     query_text = body.query
 
-    history = get_messages_cached(db, session_id, limit=10)
+    history = get_messages(db, session_id, limit=10)
     cached_duplicate_response = get_consecutive_duplicate_response(history, query_text)
 
     user_now = datetime.utcnow().isoformat()
-    cache_message_in_redis(session_id, "user", query_text, user_now)
+    cache_messages(session_id, "user", query_text, user_now)
     await publish_chat_message_event(
         ChatMessageEventPayload(session_id=session_id, role="user", content=query_text, created_at=user_now)
     )
@@ -162,7 +161,7 @@ async def chat_query(
         async def cached_sse_generator():
             yield f"data: {cached_duplicate_response}\n\n"
             assistant_now = datetime.utcnow().isoformat()
-            cache_message_in_redis(session_id, "assistant", cached_duplicate_response, assistant_now)
+            cache_messages(session_id, "assistant", cached_duplicate_response, assistant_now)
             await publish_chat_message_event(
                 ChatMessageEventPayload(session_id=session_id, role="assistant", content=cached_duplicate_response, created_at=assistant_now)
             )
@@ -183,7 +182,7 @@ async def chat_query(
             yield f"data: {chunk_text}\n\n"
 
         assistant_now = datetime.utcnow().isoformat()
-        cache_message_in_redis(session_id, "assistant", full_assistant_text, assistant_now)
+        cache_messages(session_id, "assistant", full_assistant_text, assistant_now)
         await publish_chat_message_event(
             ChatMessageEventPayload(session_id=session_id, role="assistant", content=full_assistant_text, created_at=assistant_now)
         )

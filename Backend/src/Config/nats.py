@@ -5,6 +5,8 @@ from src.config import settings
 nc = None
 js: JetStreamContext | None = None
 
+MAX_FILE_SIZE_BYTES = 64 * 1024 * 1024  # 64 MB
+
 
 async def connect_nats() -> None:
     global nc, js
@@ -17,9 +19,21 @@ async def setup_streams() -> None:
     global js
     if js:
         try:
-            await js.add_stream(name="FILES_STREAM", subjects=["files.upload", "files.embed"])
+            await js.add_stream(
+                name="FILES_STREAM",
+                subjects=["files.upload", "files.embed"],
+                max_msg_size=MAX_FILE_SIZE_BYTES
+            )
         except Exception:
-            pass
+            try:
+                await js.update_stream(
+                    name="FILES_STREAM",
+                    subjects=["files.upload", "files.embed"],
+                    max_msg_size=MAX_FILE_SIZE_BYTES
+                )
+            except Exception:
+                pass
+
         try:
             await js.add_stream(name="CHAT_STREAM", subjects=["chat.messages"])
         except Exception:

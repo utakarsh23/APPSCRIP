@@ -3,14 +3,14 @@ import asyncio
 from fastapi import APIRouter, Request, UploadFile, File, HTTPException, Depends, status
 from supabase import Client
 from src.Config.database import get_db
-from src.Schema.FileIO import FileUploadResponse, FileStatusResponse
-from src.Schema.File import FileModel
+from src.schemas.domain.file import FileModel
+from src.schemas.response.file import FileUploadResponse, FileStatusResponse
 from src.utils.chunking import chunk_text
 from src.services.file_service import get_user_files_cached, evict_user_files_cache, get_file_status
 from src.events.schema.file_event import FileUploadEventPayload
 from src.events.schema.chunk_event import FileChunkEventPayload
-from src.events.publisher.file_publisher import publish_file_upload_event
-from src.events.publisher.chunk_publisher import publish_chunk_embed_events
+from src.events.publisher.file_publisher import publish_file_event
+from src.events.publisher.chunk_publisher import publish_chunk_events
 
 router = APIRouter(prefix="/files", tags=["Files"])
 
@@ -32,6 +32,12 @@ async def upload_file(request: Request, file: UploadFile = File(...)) -> FileUpl
         )
 
     content_bytes = await file.read()
+    if len(content_bytes) > 64 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="File size exceeds the maximum limit of 64 MB."
+        )
+
     file_text = content_bytes.decode("utf-8", errors="replace")
 
     file_id = str(uuid.uuid4())
@@ -56,8 +62,8 @@ async def upload_file(request: Request, file: UploadFile = File(...)) -> FileUpl
     ]
 
     await asyncio.gather(
-        publish_file_upload_event(raw_payload),
-        publish_chunk_embed_events(chunk_payloads)
+        publish_file_event(raw_payload),
+        publish_chunk_events(chunk_payloads)
     )
 
     evict_user_files_cache(str(user_id))

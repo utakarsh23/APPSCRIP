@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, status
 from supabase import Client
 from src.Config.database import get_db
-from src.Schema.UserIO import UserSignupRequest, UserLoginRequest, UserResponse, TokenResponse
+from src.schemas.request.user import UserSignupRequest, UserLoginRequest
+from src.schemas.response.user import UserResponse, TokenResponse
 from src.services.auth_service import signup_user, login_user
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])

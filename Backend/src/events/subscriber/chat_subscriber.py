@@ -8,16 +8,16 @@ from src.Config.database import get_db
 logger = logging.getLogger(__name__)
 
 
-async def start_chat_batch_subscriber() -> None:
+async def start_chat_subscriber() -> None:
     js = get_js()
     sub = await js.subscribe(
         subject="chat.messages",
         durable="chat-batch-worker"
     )
-    asyncio.create_task(listen_and_batch_chat_messages(sub))
+    asyncio.create_task(batch_chat_messages(sub))
 
 
-async def listen_and_batch_chat_messages(sub) -> None:
+async def batch_chat_messages(sub) -> None:
     buffer = []
     ack_msgs = []
     last_flush_time = asyncio.get_event_loop().time()

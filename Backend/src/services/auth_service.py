@@ -1,8 +1,9 @@
 from datetime import datetime
 from fastapi import HTTPException, status
 from supabase import Client
-from src.Schema.User import UserModel
-from src.Schema.UserIO import UserSignupRequest, UserLoginRequest, UserResponse, TokenResponse
+from src.schemas.domain.user import UserModel
+from src.schemas.request.user import UserSignupRequest, UserLoginRequest
+from src.schemas.response.user import UserResponse, TokenResponse
 from src.utils.security import get_password_hash, verify_password, create_access_token
 
 

@@ -7,7 +7,7 @@ from src.Config.nats import connect_nats, disconnect_nats
 from src.Config.redis import connect_redis, disconnect_redis
 from src.events.subscriber.file_subscriber import start_file_subscriber
 from src.events.subscriber.chunk_subscriber import start_chunk_subscriber
-from src.events.subscriber.chat_subscriber import start_chat_batch_subscriber
+from src.events.subscriber.chat_subscriber import start_chat_subscriber
 from src.middleware.auth import verify_jwt_middleware
 from src.middleware.exception import exception_handling_middleware
 from src.routes.auth import router as auth_router
@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await connect_nats()
         await start_file_subscriber()
         await start_chunk_subscriber()
-        await start_chat_batch_subscriber()
+        await start_chat_subscriber()
     except Exception:
         pass
     yield

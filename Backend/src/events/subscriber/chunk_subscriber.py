@@ -11,10 +11,10 @@ async def start_chunk_subscriber() -> None:
         subject="files.embed",
         durable="file-embed-worker"
     )
-    asyncio.create_task(_listen_for_chunk_embeds(sub))
+    asyncio.create_task(listen_chunk_embeds(sub))
 
 
-async def _listen_for_chunk_embeds(sub) -> None:
+async def listen_chunk_embeds(sub) -> None:
     async for msg in sub.messages:
         try:
             data = json.loads(msg.data.decode("utf-8"))
