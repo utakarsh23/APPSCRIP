@@ -74,4 +74,4 @@ Build a FastAPI backend demonstrating solid backend engineering practices and im
 - [x] **Docker & Docker Compose**: `Dockerfile` + `docker-compose.yml` + `nginx/nginx.conf` for reverse proxy, rate limiting, backend, NATS+JetStream, and Redis.
 - [x] **Background Jobs**: Async NATS background workers for storage, embeddings, and chat batch inserts.
 - [x] **Streaming LLM Responses**: Server-Sent Events (SSE) `StreamingResponse` for `/chat`.
-- [ ] **Unit Tests**: Test suite using `pytest` & `httpx` for routes and services.
+- [x] **Unit Tests**: Test suite using `pytest` & `httpx` (`tests/test_unit.py` and `tests/test_routes.py` passing 9 tests).
