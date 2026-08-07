@@ -269,6 +269,28 @@ uvicorn src.main:app --reload --port 8000
 
 Check: `http://localhost:8000/health` → `{"status": "ok", "environment": "development"}`
 
+### 5. Running Tests
+
+#### Automated Unit Tests (`pytest`)
+
+Run the 9 unit and integration route tests:
+
+```bash
+cd Backend
+source venv/bin/activate
+pytest -v
+```
+
+#### Testing Nginx Rate Limiting
+
+To verify edge rate-limiting (returns `429 Too Many Requests` after quota):
+
+```bash
+for i in {1..35}; do
+  curl -s -o /dev/null -w "Req $i: %{http_code}\n" http://localhost/health
+done
+```
+
 ---
 
 ## API Endpoints
